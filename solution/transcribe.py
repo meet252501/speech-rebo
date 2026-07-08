@@ -30,7 +30,7 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
     try:
         from faster_whisper import WhisperModel
         if _model_fast is None:
-            _model_fast = WhisperModel("tiny", device="cpu", compute_type="int8")
+            _model_fast = WhisperModel("tiny", device="auto", compute_type="int8")
             
         a = time.time()
         # 1. Fast Path & Router
@@ -46,7 +46,7 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
         if mode_used == "hinglish":
             global _model_heavy
             if _model_heavy is None:
-                _model_heavy = WhisperModel("shunyalabs_zero_stt_ct2", device="cpu", compute_type="int8", local_files_only=True)
+                _model_heavy = WhisperModel("shunyalabs_zero_stt_ct2", device="auto", compute_type="int8", local_files_only=True)
             heavy_segments, heavy_info = _model_heavy.transcribe(wav_path, task="transcribe")
             text = " ".join(s.text for s in heavy_segments).strip()
             model_ids = ["faster-whisper-tiny", "shunyalabs/zero-stt-hinglish"]
@@ -56,7 +56,7 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
             global _model_en
             if 'model_en' not in globals():
                 global model_en
-                model_en = WhisperModel("whisper_base_en_ct2", device="cpu", compute_type="int8", local_files_only=True)
+                model_en = WhisperModel("whisper_base_en_ct2", device="auto", compute_type="int8", local_files_only=True)
             en_segments, en_info = model_en.transcribe(wav_path, task="transcribe", initial_prompt="Sintra, Lord Byron, word Sie, splendours.")
             text = " ".join(s.text for s in en_segments).strip()
             model_ids = ["faster-whisper-tiny", "whisper_base_en_ct2"]
