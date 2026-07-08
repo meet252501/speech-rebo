@@ -226,7 +226,10 @@ def _start_server(module: str, port: int) -> subprocess.Popen:
 
 async def _evaluate(manifest_path: str, server_module: str, runs: int,
                     enforce_offline: bool) -> dict:
-    manifest = json.load(open(manifest_path))
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+    manifest = json.load(open(manifest_path, encoding='utf-8'))
+
     base = os.path.dirname(os.path.abspath(manifest_path))
     for c in manifest:
         wav = c.get("audio_local") or os.path.join(base, os.path.basename(c.get("audio", c["clip_id"] + ".wav")))
