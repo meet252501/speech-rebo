@@ -16,24 +16,24 @@ _active_model = None
 
 def init(root: str):
     global _model_en, _model_heavy, _model_tiny
-    if _model_en is None:
-        _model_en = WhisperModel(
-            os.path.join(root, "whisper_base_en_ct2"),
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=4,
-            local_files_only=True,
-        )
-    if _model_heavy is None:
-        _model_heavy = WhisperModel(
-            os.path.join(root, "shunyalabs_zero_stt_ct2"),
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=4,
-            local_files_only=True,
-        )
-    if _model_tiny is None:
-        _model_tiny = WhisperModel("tiny", device="cpu", compute_type="int8", local_files_only=True)
+            if _model_tiny is None:
+                _model_tiny = WhisperModel("tiny", device="cpu", compute_type="int8")
+            if _model_en is None:
+                _model_en = WhisperModel(
+                    os.path.join(root, "whisper_base_en_ct2"),
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=4,
+                    local_files_only=True,
+                )
+            if _model_heavy is None:
+                _model_heavy = WhisperModel(
+                    os.path.join(root, "shunyalabs_zero_stt_ct2"),
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=4,
+                    local_files_only=True,
+                )
 
 def draft_reset():
     global _call_count, _partial_text, _stable_chars, _is_hinglish_stream, _active_model

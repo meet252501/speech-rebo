@@ -30,7 +30,7 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
     try:
         from faster_whisper import WhisperModel
         if _model_fast is None:
-            _model_fast = WhisperModel("tiny", device="cpu", compute_type="int8", local_files_only=True)
+            _model_fast = WhisperModel("tiny", device="cpu", compute_type="int8")
             
         a = time.time()
         # 1. Fast Path & Router
