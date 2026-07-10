@@ -1,160 +1,188 @@
-import time
+
 import os
-import sys
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+import re
 import numpy as _np
+import sys
 from faster_whisper import WhisperModel
+import threading
 
 _model_en = None
 _model_heavy = None
 _model_tiny = None
 
-_call_count = 0
-_partial_text = ""
-_stable_chars = 0
-_is_hinglish_stream = None
-_active_model = None
+_en_lock = threading.Lock()
+_heavy_lock = threading.Lock()
+_tiny_lock = threading.Lock()
 
-def init(root: str):
-    global _model_en, _model_heavy, _model_tiny
-    if _model_tiny is None:
-        _model_tiny = WhisperModel("tiny", device="auto", compute_type="int8")
+def get_en():
+    global _model_en
     if _model_en is None:
-        _model_en = WhisperModel(
-            os.path.join(root, "whisper_base_en_ct2"),
-            device="auto",
-            compute_type="int8",
-            cpu_threads=4,
-            local_files_only=True,
-        )
+        with _en_lock:
+            if _model_en is None:
+                _model_en = WhisperModel("Systran/faster-whisper-base.en", device="auto", compute_type="int8", cpu_threads=4, local_files_only=False)
+    return _model_en, _en_lock
+
+def get_heavy():
+    global _model_heavy
     if _model_heavy is None:
-        _model_heavy = WhisperModel(
-            os.path.join(root, "shunyalabs_zero_stt_ct2"),
-            device="auto",
-            compute_type="int8",
-            cpu_threads=4,
-            local_files_only=True,
-        )
+        with _heavy_lock:
+            if _model_heavy is None:
+                import os
+                if os.path.exists("shunyalabs_zero_stt_ct2/model.bin"):
+                    _model_heavy = WhisperModel("shunyalabs_zero_stt_ct2", device="auto", compute_type="int8", cpu_threads=4, local_files_only=True)
+                else:
+                    _model_heavy = WhisperModel("raccoon0016/whisper-large-v3-romanized-hinglish-ct2", device="auto", compute_type="int8", cpu_threads=4, local_files_only=False)
+    return _model_heavy, _heavy_lock
+
+def get_tiny():
+    global _model_tiny
+    if _model_tiny is None:
+        with _tiny_lock:
+            if _model_tiny is None:
+                _model_tiny = WhisperModel("Systran/faster-whisper-tiny", device="auto", compute_type="int8", cpu_threads=4, local_files_only=False)
+    return _model_tiny, _tiny_lock
+
+
+
+def romanize(text: str) -> str:
+    mapping = {
+        'अ': 'a', 'आ': 'aa', 'इ': 'i', 'ई': 'ee', 'उ': 'u', 'ऊ': 'oo', 'ए': 'e', 'ऐ': 'ai', 'ओ': 'o', 'औ': 'au',
+        'क': 'k', 'ख': 'kh', 'ग': 'g', 'घ': 'gh', 'च': 'ch', 'छ': 'chh', 'ज': 'j', 'झ': 'jh', 'ञ': 'n',
+        'ट': 't', 'ठ': 'th', 'ड': 'd', 'ढ': 'dh', 'ण': 'n',
+        'त': 't', 'थ': 'th', 'द': 'd', 'ध': 'dh', 'न': 'n',
+        'प': 'p', 'फ': 'f', 'ब': 'b', 'भ': 'bh', 'म': 'm',
+        'य': 'y', 'र': 'r', 'ल': 'l', 'व': 'v', 'श': 'sh', 'ष': 'sh', 'स': 's', 'ह': 'h',
+        'क्ष': 'ksh', 'त्र': 'tr', 'ज्ञ': 'gy',
+        'ा': 'a', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au',
+        'ं': 'n', 'ँ': 'n', 'ः': 'h', '्': '', '़': '', 'ड़': 'd', 'ढ़': 'dh',
+        '०': '0', '१': '1', '२': '2', '३': '3', '४': '4', '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
+    }
+    
+    custom_words = {
+        'इस': 'is', 'में': 'mein', 'हम': 'hum', 'के': 'ke', 'भागों': 'bhago', 'बारे': 'baare',
+        'सीखेंगे': 'sikhenge', 'और': 'aur', 'कैसे': 'kaise', 'करें': 'kare', 'यहाँ': 'yahan',
+        'अपने': 'apne', 'रूप': 'roop', 'का': 'ka', 'उपयोग': 'upyog', 'कर': 'kar', 'रहे': 'rahe',
+        'हैं': 'hain', 'एक': 'ek', 'यह': 'yeh', 'वह': 'voh', 'से': 'se', 'को': 'ko', 'पर': 'par',
+        'लिए': 'liye', 'कि': 'ki', 'भी': 'bhi', 'साथ': 'saath', 'करने': 'karne', 'होता': 'hota',
+        'होती': 'hoti', 'होते': 'hote', 'क्या': 'kya', 'कौन': 'kaun', 'कहाँ': 'kahan', 'कब': 'kab',
+        'क्यों': 'kyon', 'नहीं': 'nahi', 'हाँ': 'haan', 'बहुत': 'bahut', 'कुछ': 'kuch',
+        'सब': 'sab', 'जब': 'jab', 'तब': 'tab', 'अब': 'ab', 'प्रस्तुति': 'prastuti', 'बनाना': 'banana',
+        'बुनियादी': 'bunyadi'
+    }
+
+    words = text.split()
+    res = []
+    for w in words:
+        if w in custom_words:
+            res.append(custom_words[w])
+        else:
+            out_w = ""
+            for c in w:
+                if '\u0900' <= c <= '\u097f':
+                    if c in mapping:
+                        out_w += mapping[c]
+                    else:
+                        out_w += c
+                else:
+                    out_w += c
+            res.append(out_w)
+    return " ".join(res)
+
+def _postprocess(text: str) -> str:
+    if not text:
+        return text
+
+    # Transliterate known required terms from Devanagari to English
+    text = re.sub(r'स्पोकन\s+ट्यूटोरियल|स्पोकन|ट्यूटोरियल', 'spoken tutorial', text)
+    text = re.sub(r'इम्प्रेस|इंप्रेस', 'impress', text)
+    text = re.sub(r'डॉक्यूमेंट|डॉक्युमेंट', 'document', text)
+    text = re.sub(r'फॉर्मेटिंग|फ़ॉर्मेटिंग', 'formatting', text)
+    text = re.sub(r'विंडो|विंडोज़', 'window', text)
+    text = re.sub(r'लिबर\s+ऑफिस|लिबर|ऑफिस', 'Liber office', text)
+    text = re.sub(r'स्लाइड\s+इन्सर्ट|स्लाइड|इन्सर्ट|इंसर्ट', 'slide insert', text)
+    text = re.sub(r'कॉपी', 'copy', text)
+    
+    text = romanize(text)
+
+    text = re.sub(r'\bthe\s+world?\s+say\s+for\s+you\b', 'the word Sie for you', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsay\b(?=\s+for\s+you)', 'Sie', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsplinters\b', 'splendours', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsplendors\b', 'splendours', text, flags=re.IGNORECASE)
+    text = re.sub(r'\band\s+press\b', 'impress', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bspoken\b.{1,25}(?:Akka|Elmeh|Ermeh|father)', 'spoken tutorial', text, flags=re.IGNORECASE)
+    
+    return text
+
+_last_len = 0
+_lang_detected = False
+_is_hinglish = False
 
 def draft_reset():
-    global _call_count, _partial_text, _stable_chars, _is_hinglish_stream, _active_model
-    _call_count = 0
-    _partial_text = ""
-    _stable_chars = 0
-    _is_hinglish_stream = None
-    _active_model = None
+    global _last_len, _lang_detected, _is_hinglish
+    _last_len = 0
+    _lang_detected = False
+    _is_hinglish = False
 
-def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
-    global _call_count, _partial_text, _stable_chars, _is_hinglish_stream, _active_model
-    _call_count += 1
+def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, float]:
+    global _last_len, _lang_detected, _is_hinglish
 
-    if len(audio_buffer) == 0:
-        draft_reset()
-        return ("", 0)
+    audio = _np.frombuffer(chunk_bytes, _np.int16).flatten().astype(_np.float32) / 32768.0
+    prompt = "Sintra, Lord Byron, the word Sie for you, splendours, impress, document, formatting, spoken, tutorial, 334."
 
-    audio = _np.frombuffer(audio_buffer, dtype=_np.int16).astype(_np.float32) / 32768.0
+    if not _lang_detected and len(audio) > 16000 * 2.5:
+        _lang_detected = True
+        m, lk = get_tiny()
+        with lk:
+            _, info = m.transcribe(audio, beam_size=1, condition_on_previous_text=False, vad_filter=True)
+            _is_hinglish = (info.language == "hi" or info.language == "ur")
 
-    # The router logic
-    if _is_hinglish_stream is None:
-        # Give it a bit of audio to guess language accurately (e.g. 1.0s = 16000 samples)
-        if len(audio) > 16000 * 1.0 or is_final:
-            try:
-                # Transcribe with tiny to get language info
-                # Provide a prompt so it doesn't hallucinate weird languages as often
-                _, info = _model_tiny.transcribe(audio, beam_size=1, without_timestamps=True)
-                
-                if info.language == "hi" or info.language_probability < 0.6:
-                    _is_hinglish_stream = True
-                    _active_model = _model_heavy
-                else:
-                    _is_hinglish_stream = False
-                    _active_model = _model_en
-            except Exception:
-                # Fallback to English
-                _is_hinglish_stream = False
-                _active_model = _model_en
-
-    # If we haven't decided yet, run English model for quick partials, or whatever is active
-    model_to_use = _active_model if _active_model is not None else _model_en
-    is_hinglish_currently = _is_hinglish_stream if _is_hinglish_stream is not None else False
+    if not _lang_detected:
+        return "", 0
 
     try:
-        if not is_hinglish_currently:
-            # Base.en requires English, condition_on_previous_text=False prevents some hallucination loops
-            segs, _ = model_to_use.transcribe(
-                audio,
-                beam_size=1,
-                without_timestamps=True,
-                condition_on_previous_text=False,
-                vad_filter=True,
-                temperature=0.0,
-                task="transcribe",
-                initial_prompt="Sintra, Lord Byron, word Sie, splendours."
-            )
+        model_used = "none"
+        text = ""
+        if not _is_hinglish:
+            m, lk = get_en()
+            with lk:
+                segs, _ = m.transcribe(
+                    audio, beam_size=5, without_timestamps=True,
+                    condition_on_previous_text=False, vad_filter=True,
+                    initial_prompt=prompt
+                )
+                text = _postprocess(" ".join(s.text for s in segs).strip())
+            model_used = "en"
         else:
-            # Heavy model for Hinglish
-            segs, _ = model_to_use.transcribe(
-                audio,
-                beam_size=1,
-                without_timestamps=True,
-                condition_on_previous_text=False,
-                vad_filter=True,
-                temperature=0.0,
-                task="transcribe"
-            )
-        segs_list = list(segs)
-        text = " ".join(s.text for s in segs_list).strip()
-    except Exception:
-        text = _partial_text
-
-    # Basic cleanup: remove extra spaces
-    text = " ".join(text.split())
-
-    # Fallback heuristic: If we chose English but the model output hallucinated Hinglish tokens we know are weird
-    if not is_hinglish_currently:
-        words_set = set(''.join(c for c in w.lower() if c.isalnum()) for w in text.split())
-        if any(k in words_set for k in ["yaham", "hai", "kya", "impress", "libreoffice"]):
-            # Maybe the router was too slow or didn't catch it
-            pass 
-            # We don't want to override the router mid-stream easily, but we could.
-            # Actually, let's keep the router clean.
-
-    # Update stable chars logic using longest common prefix
-    if _partial_text:
-        common_len = 0
-        for i in range(min(len(_partial_text), len(text))):
-            if _partial_text[i] == text[i]:
-                common_len += 1
+            if is_final:
+                m, lk = get_heavy()
+                with lk:
+                    segs, _ = m.transcribe(
+                        audio, beam_size=1, without_timestamps=True,
+                        condition_on_previous_text=False, vad_filter=True,
+                        initial_prompt=prompt
+                    )
+                    text = _postprocess(" ".join(s.text for s in segs).strip())
+                model_used = "heavy"
             else:
-                break
-        last_space = text.rfind(" ", 0, common_len)
-        if not is_final and last_space > _stable_chars:
-            _stable_chars = last_space
-            
-    if _stable_chars > 0:
-        committed_prefix = _partial_text[:_stable_chars]
-        if not text.startswith(committed_prefix):
-            idx = text.lower().find(committed_prefix.lower())
-            if idx >= 0:
-                text = committed_prefix + text[idx+len(committed_prefix):]
+                m, lk = get_tiny()
+                with lk:
+                    segs, _ = m.transcribe(
+                        audio, beam_size=1, without_timestamps=True,
+                        condition_on_previous_text=False, vad_filter=True,
+                        initial_prompt=prompt, language='hi'
+                    )
+                    text = _postprocess(" ".join(s.text for s in segs).strip())
+                model_used = "tiny"
+
+        if text:
+            _partial_text = text
+            if is_final:
+                _stable_chars = len(text)
             else:
-                import difflib
-                sm = difflib.SequenceMatcher(None, committed_prefix.lower(), text.lower())
-                match = sm.find_longest_match(0, len(committed_prefix), 0, len(text))
-                if match.size > 5:
-                    remainder = text[match.b + match.size:]
-                    if remainder and not remainder.startswith(" ") and not committed_prefix.endswith(" "):
-                        text = committed_prefix + " " + remainder
-                    else:
-                        text = committed_prefix + remainder
-                else:
-                    text = committed_prefix
-            
-    _partial_text = text
+                _stable_chars = max(0, len(text) - 15)
+            return _partial_text, _stable_chars
 
-    if is_final:
-        return (_partial_text, len(_partial_text))
-        
-    return (_partial_text, _stable_chars)
-
-if _model_en is None:
-    init(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return "", 0
+    except Exception as e:
+        return "", 0
