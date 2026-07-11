@@ -32,7 +32,7 @@ def get_heavy():
                 if os.path.exists("shunyalabs_zero_stt_ct2/model.bin"):
                     _model_heavy = WhisperModel("shunyalabs_zero_stt_ct2", device="auto", compute_type="int8", cpu_threads=4, local_files_only=True)
                 else:
-                    _model_heavy = WhisperModel("raccoon0016/whisper-large-v3-romanized-hinglish-ct2", device="auto", compute_type="int8", cpu_threads=4, local_files_only=False)
+                    _model_heavy = WhisperModel("Systran/faster-whisper-large-v3", device="auto", compute_type="int8", cpu_threads=4, local_files_only=False)
     return _model_heavy, _heavy_lock
 
 def get_tiny():
@@ -103,8 +103,6 @@ def _postprocess(text: str) -> str:
     text = re.sub(r'स्लाइड\s+इन्सर्ट|स्लाइड|इन्सर्ट|इंसर्ट', 'slide insert', text)
     text = re.sub(r'कॉपी', 'copy', text)
     
-    text = romanize(text)
-
     text = re.sub(r'\bthe\s+world?\s+say\s+for\s+you\b', 'the word Sie for you', text, flags=re.IGNORECASE)
     text = re.sub(r'\bsay\b(?=\s+for\s+you)', 'Sie', text, flags=re.IGNORECASE)
     text = re.sub(r'\bsplinters\b', 'splendours', text, flags=re.IGNORECASE)
