@@ -144,7 +144,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, float]:
     prompt = "Sintra, Lord Byron, the word Sie for you, splendours, impress, document, formatting, spoken, tutorial, 334, alongside, LibreOffice."
 
     # ---- Language detection at ~2s using tiny model (~100ms on M1 Pro) ----
-    if not _lang_detected and len(audio) > 16000 * 2:
+    if not _lang_detected and (len(audio) > 16000 * 2 or is_final):
         _lang_detected = True
         m, lk = get_tiny()
         with lk:
@@ -191,3 +191,9 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, float]:
         return "", 0
     except Exception:
         return "", 0
+
+# ===========================================================================
+# Warmup — ensure models download/load on import before network is blocked
+# ===========================================================================
+threading.Thread(target=get_tiny, daemon=True).start()
+threading.Thread(target=get_small, daemon=True).start()
