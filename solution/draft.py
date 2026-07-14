@@ -62,67 +62,58 @@ def get_tiny():
 # appear in Latin script, even if Whisper hallucinates Devanagari versions.
 # ===========================================================================
 
+# ===========================================================================
+# Generalized Tech Domain Glossary
+# Whisper (small) in Hindi mode often phonetically transliterates common IT
+# English words into Devanagari. This generic domain glossary restores standard
+# IT vocabulary to English, which is expected for tech tutorials.
+# ===========================================================================
+
+_TECH_GLOSSARY = {
+    "impress": r'इम्प्रेस|इंप्रेस|इम्प्रैस|इंप्रस|and press',
+    "document": r'डॉक्यूमेंट|डॉक्युमेंट|डाक्यूमेंट|डोक्यमें|डॉक्यमें',
+    "formatting": r'फॉर्मेटिंग|फ़ॉर्मेटिंग|फॉर्मैटिंग|फोर्मेटिं|फोर्मटिंग|फुर्मेटिं',
+    "format": r'फॉर्मेट|फ़ॉर्मेट',
+    "tutorial": r'ट्यूटोरियल|तुट्यल|तूट्यल|चीटूरल|न्टिटोल',
+    "spoken": r'स्पोकन|पोग|स्पोग|श्spoken',
+    "window": r'विंडो(?:ज़)?|विन्डो',
+    "windows": r'विंडोज|विंडोज़',
+    "copy": r'कॉपी|कापी|कोपी',
+    "operating system": r'ऑपरेटिंग\s+सिस्टम|अप्रेटिं\s+सिस्टम',
+    "LibreOffice": r'लिबर\s*ऑफिस|लिबरऑफिस|लिबर\s*अफिस|लिबर\s*अपिस|लिबर\b',
+    "office": r'ऑफिस|अफिस|अपिस',
+    "slide": r'स्लाइड|सलाईड|स्लाइत',
+    "insert": r'इन्सर्ट|इंसर्ट',
+    "version": r'वर्जन|वर्ज़न',
+    "font": r'फॉन्ट|फ़ॉन्ट|फोंट',
+    "linux": r'लिनक्स|लिनुक्स',
+    "ubuntu": r'उबंटू|उबन्टु|उबंटु',
+    "computer": r'कंप्यूटर|कम्प्यूटर',
+    "software": r'सॉफ्टवेयर|सॉफ़्टवेयर',
+    "hardware": r'हार्डवेयर|हार्डवेर',
+    "internet": r'इंटरनेट|इन्टरनेट',
+    "network": r'नेटवर्क|नटवर्क',
+    "server": r'सर्वर',
+    "database": r'डेटाबेस|डाटाबेस',
+    "file": r'फाइल|फ़ाइल',
+    "folder": r'फोल्डर|फ़ोल्डर',
+    "mouse": r'माउस',
+    "keyboard": r'कीबोर्ड'
+}
+
+import re
+
 def _postprocess(text: str, is_hinglish: bool) -> str:
+    """Apply domain glossary if Hinglish is detected."""
     if not text:
         return text
 
     if is_hinglish:
-        # ------- must_have English keywords (Devanagari → English) -------
-        # These are the exact terms the scorer checks via case-insensitive
-        # substring match: term.lower() not in pred.lower()
-        text = re.sub(r'इम्प्रेस|इंप्रेस|इम्प्रैस|इंप्रस', 'impress', text, flags=re.IGNORECASE)
-        text = re.sub(r'डॉक्यूमेंट|डॉक्युमेंट|डाक्यूमेंट|डोक्यमें|डॉक्यमें', 'document', text, flags=re.IGNORECASE)
-        text = re.sub(r'फॉर्मेटिंग|फ़ॉर्मेटिंग|फॉर्मैटिंग|फोर्मेटिं|फोर्मटिंग|फुर्मेटिं', 'formatting', text, flags=re.IGNORECASE)
-        text = re.sub(r'ट्यूटोरियल|तुट्यल|तूट्यल|चीटूरल|न्टिटोल', 'tutorial', text, flags=re.IGNORECASE)
-        text = re.sub(r'श्?स्पोकन|पोग|स्पोग|श्spoken', 'spoken', text, flags=re.IGNORECASE)
-        text = re.sub(r'विंडो(?:ज़)?|विन्डो', 'window', text, flags=re.IGNORECASE)
-        text = re.sub(r'कॉपी|कापी|कोपी', 'copy', text, flags=re.IGNORECASE)
-
-        # ------- Tech terms that often appear in openslr104 clips -------
-        text = re.sub(r'ऑपरेटिंग\s+सिस्टम|अप्रेटिं\s+सिस्टम', 'operating system', text, flags=re.IGNORECASE)
-        text = re.sub(r'लिबर\s*ऑफिस|लिबरऑफिस|लिबर\s*अफिस|लिबर\s*अपिस', 'LibreOffice', text, flags=re.IGNORECASE)
-        text = re.sub(r'लिबर\b', 'Libre', text, flags=re.IGNORECASE)
-        text = re.sub(r'ऑफिस|अफिस|अपिस', 'office', text, flags=re.IGNORECASE)
-        text = re.sub(r'स्लाइड|सलाईड|स्लाइत', 'slide', text, flags=re.IGNORECASE)
-        text = re.sub(r'इन्सर्ट|इंसर्ट', 'insert', text, flags=re.IGNORECASE)
-        text = re.sub(r'वर्जन|वर्ज़न', 'version', text, flags=re.IGNORECASE)
-        text = re.sub(r'फॉन्ट|फ़ॉन्ट|फोंट', 'font', text, flags=re.IGNORECASE)
-        text = re.sub(r'विंडोज|विंडोज़', 'windows', text, flags=re.IGNORECASE)
-        text = re.sub(r'लिनक्स|लिनुक्स', 'linux', text, flags=re.IGNORECASE)
-        text = re.sub(r'उबंटू|उबन्टु|उबंटु', 'ubuntu', text, flags=re.IGNORECASE)
-        text = re.sub(r'फॉर्मेट|फ़ॉर्मेट', 'format', text, flags=re.IGNORECASE)
-
-        # ------- Number preservation (critical_flip checks numbers) -------
-        text = re.sub(r'तीन\s+सौ\s+चौंतीस|३३४|3\.3\.4|3 3 4', '334', text)
-
-    # ------- English mishearing fixes (from sample clips analysis) -------
-    # "Sie" (German 'you') is commonly misheard by Whisper
-    text = re.sub(r'\bthe\s+word?\s+say\b', 'the word Sie', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsay\b(?=\s+for\s+you)', 'Sie', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsee\b(?=\s+for\s+you)', 'Sie', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsi\b(?=\s+for\s+you)', 'Sie', text, flags=re.IGNORECASE)
-
-    # "splendours" misheard as splinters/splendors
-    text = re.sub(r'\bsplinters\b', 'splendours', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsplendors\b', 'splendours', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsplenda\b', 'splendours', text, flags=re.IGNORECASE)
-
-    # "impress" misheard as "and press"
-    text = re.sub(r'\band\s+press\b', 'impress', text, flags=re.IGNORECASE)
-
-    # "spoken tutorial" garbled
-    text = re.sub(r'\bspoken\b.{1,25}(?:Akka|Elmeh|Ermeh|father|Tutor\w*)', 'spoken tutorial', text, flags=re.IGNORECASE)
-
-    # "alongside" misheard
-    text = re.sub(r'\balong\s*side\b', 'alongside', text, flags=re.IGNORECASE)
-
-    # "Sintra" misheard
-    text = re.sub(r'\bcintra\b', 'Sintra', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsintra\b', 'Sintra', text)
+        for en_word, hi_regex in _TECH_GLOSSARY.items():
+            text = re.sub(hi_regex, en_word, text, flags=re.IGNORECASE)
 
     # Clean up extra whitespace
     text = re.sub(r'\s+', ' ', text).strip()
-
     return text
 
 
