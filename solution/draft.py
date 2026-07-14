@@ -196,7 +196,8 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, float]:
         return "", 0
 
 # ===========================================================================
-# Warmup — ensure models download/load on import before network is blocked
+# Warmup — ensure models download/load on import before network is blocked.
+# MUST be synchronous so stream_server waits for them before printing READY.
 # ===========================================================================
-threading.Thread(target=get_tiny, daemon=True).start()
-threading.Thread(target=get_small, daemon=True).start()
+get_tiny()
+get_small()
