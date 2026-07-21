@@ -112,7 +112,7 @@ def _safe_draft(audio: bytes, is_final: bool):
 
 
 async def _serve(host: str, port: int):
-    async with websockets.serve(_handle, host, port, max_size=None):
+    async with websockets.serve(_handle, host, port, max_size=None, ping_interval=None, ping_timeout=None):
         sys.stdout.write(f"READY port={port}\n")
         sys.stdout.flush()
         await asyncio.Future()  # run forever

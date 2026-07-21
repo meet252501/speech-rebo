@@ -15,13 +15,13 @@ from solution.transcribe import transcribe
 
 
 def main():
-    manifest = json.load(open(os.path.join(HERE, "data/dev/manifest.json")))
+    manifest = json.load(open(os.path.join(HERE, "samples/manifest.json"), encoding="utf-8"))
     block_network()  # mirror official scoring: no cloud during the run
     rows = []
     for clip in manifest:
-        # audio_local when the pool audio is on this machine; else data/dev/audio/<id>.wav
+        # audio_local when the pool audio is on this machine; else samples/<id>.wav
         # (the Action's fetch_audio.py downloads each clip from HF by provenance id)
-        wav = clip.get("audio_local") or os.path.join(HERE, "data/dev/audio", clip["clip_id"] + ".wav")
+        wav = clip.get("audio_local") or os.path.join(HERE, "samples", clip["clip_id"] + ".wav")
         r = transcribe(wav, clip.get("mode", "auto"))
         rows.append({
             "clip_id": clip["clip_id"], "gold": clip["gold"], "pred": r.get("text", ""),

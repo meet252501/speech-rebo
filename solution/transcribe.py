@@ -30,7 +30,7 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
     try:
         from faster_whisper import WhisperModel
         if _model_fast is None:
-            _model_fast = WhisperModel("tiny", device="auto", compute_type="int8")
+            _model_fast = WhisperModel("whisper_tiny_ct2", device="auto", compute_type="int8", local_files_only=True)
             
         a = time.time()
         # 1. Fast Path & Router
@@ -57,7 +57,7 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
             if 'model_en' not in globals():
                 global model_en
                 model_en = WhisperModel("whisper_base_en_ct2", device="auto", compute_type="int8", local_files_only=True)
-            en_segments, en_info = model_en.transcribe(wav_path, task="transcribe", initial_prompt="Sintra, Lord Byron, word Sie, splendours.")
+            en_segments, en_info = model_en.transcribe(wav_path, task="transcribe")
             text = " ".join(s.text for s in en_segments).strip()
             model_ids = ["faster-whisper-tiny", "whisper_base_en_ct2"]
             candidates = [{"engine": "whisper_base_en_ct2", "text": text}]
