@@ -9,52 +9,56 @@ from faster_whisper import WhisperModel
 # ===========================================================================
 # Streaming speech-to-text draft — Hindi + English
 #
-# Architecture:
-#   - whisper-tiny  → fast language detection (~100ms on M1 Pro)
-#   - whisper-small → accurate transcription (~1-1.5s on M1 Pro)
-#   - beam_size=3 for finals, beam_size=1 for partials
-#   - No sample-specific prompts or target-term lists
+# Architecture (mirrors RambleFix: fast drafter + accurate finalizer):
+#   - whisper_tiny_ct2    → fast partials (~100ms on M1 Pro)
+#   - shunyalabs_zero_stt → accurate finals (Hindi-English specialist)
+#   - Background pre-transcription: shunyalabs runs in a bg thread during
+#     streaming so the final is often pre-cached → near-zero E2F latency
+#   - No language detection delay — start transcribing immediately
+#   - beam_size=1 everywhere for maximum speed
+#   - No sample-specific prompts or glossaries
 # ===========================================================================
 
-_model_small = None
 _model_tiny = None
+_model_shunyalabs = None
 
-_small_lock = threading.Lock()
 _tiny_lock = threading.Lock()
+_shunyalabs_lock = threading.Lock()
 
-def get_small():
-    """Main transcription model — whisper-small."""
-    global _model_small
-    if _model_small is None:
-        with _small_lock:
-            if _model_small is None:
-                _model_small = WhisperModel(
-                    "Systran/faster-whisper-small",
-                    device="auto", compute_type="int8",
-                    cpu_threads=4, local_files_only=False
-                )
-    return _model_small, _small_lock
 
 def get_tiny():
-    """Ultra-fast language detector — whisper-tiny."""
+    """Ultra-fast partial drafter — whisper-tiny (bundled, 75MB)."""
     global _model_tiny
     if _model_tiny is None:
         with _tiny_lock:
             if _model_tiny is None:
                 _model_tiny = WhisperModel(
-                    "Systran/faster-whisper-tiny",
+                    "whisper_tiny_ct2",
                     device="auto", compute_type="int8",
-                    cpu_threads=4, local_files_only=False
+                    cpu_threads=4, local_files_only=True
                 )
     return _model_tiny, _tiny_lock
 
 
+def get_shunyalabs():
+    """Accurate Hindi-English finalizer — shunyalabs (bundled, 769MB)."""
+    global _model_shunyalabs
+    if _model_shunyalabs is None:
+        with _shunyalabs_lock:
+            if _model_shunyalabs is None:
+                _model_shunyalabs = WhisperModel(
+                    "shunyalabs_zero_stt_ct2",
+                    device="auto", compute_type="int8",
+                    cpu_threads=4, local_files_only=True
+                )
+    return _model_shunyalabs, _shunyalabs_lock
+
+
 # ===========================================================================
-# Postprocessing — clean up whitespace only, no domain-specific rewrites
+# Postprocessing — clean whitespace only, no domain-specific rewrites
 # ===========================================================================
 
 def _postprocess(text: str) -> str:
-    """Clean up the final text output."""
     if not text:
         return text
     text = re.sub(r'\s+', ' ', text).strip()
@@ -62,70 +66,147 @@ def _postprocess(text: str) -> str:
 
 
 # ===========================================================================
+# Background pre-transcription state
+# ===========================================================================
+
+_bg_result = None          # latest shunyalabs transcription (cached)
+_bg_result_lock = threading.Lock()
+_bg_thread = None          # current background transcription thread
+_bg_audio_len = 0          # audio length that bg_result corresponds to
+
+
+def _bg_transcribe(audio_float: _np.ndarray, audio_len: int):
+    """Run shunyalabs in background thread and cache the result."""
+    global _bg_result, _bg_audio_len
+    try:
+        m, lk = get_shunyalabs()
+        with lk:
+            segs, _ = m.transcribe(
+                audio_float,
+                beam_size=1,
+                without_timestamps=True,
+                condition_on_previous_text=False,
+                vad_filter=True
+            )
+            text = _postprocess(" ".join(s.text for s in segs).strip())
+        with _bg_result_lock:
+            # Only update if this is for more audio than the current cache
+            if audio_len >= _bg_audio_len:
+                _bg_result = text
+                _bg_audio_len = audio_len
+    except Exception:
+        pass  # never crash the background thread
+
+
+# ===========================================================================
 # Streaming state
 # ===========================================================================
 
-_lang_detected = False
-_is_hinglish = False
+_last_bg_kick = 0  # audio length when we last kicked off a bg thread
 
 def draft_reset():
-    global _lang_detected, _is_hinglish
-    _lang_detected = False
-    _is_hinglish = False
+    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick
+    with _bg_result_lock:
+        _bg_result = None
+        _bg_audio_len = 0
+    _bg_thread = None
+    _last_bg_kick = 0
 
-def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, float]:
-    global _lang_detected, _is_hinglish
+
+def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
+    global _bg_thread, _last_bg_kick
 
     audio = _np.frombuffer(chunk_bytes, _np.int16).flatten().astype(_np.float32) / 32768.0
+    audio_len = len(audio)
 
-    # ---- Language detection at ~2s using tiny model ----
-    if not _lang_detected and (len(audio) > 16000 * 2 or is_final):
-        _lang_detected = True
-        m, lk = get_tiny()
-        with lk:
-            _, info = m.transcribe(audio, beam_size=1, condition_on_previous_text=False, vad_filter=True)
-            _is_hinglish = (info.language == "hi" or info.language == "ur")
+    # ---- FINAL: use shunyalabs for maximum accuracy ----
+    if is_final:
+        # Strategy: check if background thread has a recent result
+        # If the bg thread is still running, wait for it (up to 8s)
+        if _bg_thread is not None and _bg_thread.is_alive():
+            _bg_thread.join(timeout=8.0)
 
-    if not _lang_detected:
-        return "", 0
+        # Check cached result
+        with _bg_result_lock:
+            cached = _bg_result
 
-    try:
-        m, lk = get_small()
-        with lk:
-            if _is_hinglish:
+        if cached:
+            return (cached, len(cached))
+
+        # Fallback: run shunyalabs synchronously
+        try:
+            m, lk = get_shunyalabs()
+            with lk:
                 segs, _ = m.transcribe(
                     audio,
-                    beam_size=3 if is_final else 1,
-                    without_timestamps=True,
-                    condition_on_previous_text=False,
-                    vad_filter=True,
-                    language='hi'
-                )
-            else:
-                segs, _ = m.transcribe(
-                    audio,
-                    beam_size=3 if is_final else 1,
+                    beam_size=1,
                     without_timestamps=True,
                     condition_on_previous_text=False,
                     vad_filter=True
                 )
+                text = _postprocess(" ".join(s.text for s in segs).strip())
+            if text:
+                return (text, len(text))
+        except Exception:
+            pass
+
+        # Last resort: use whatever whisper-tiny can produce
+        try:
+            m, lk = get_tiny()
+            with lk:
+                segs, _ = m.transcribe(
+                    audio, beam_size=1,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,
+                    vad_filter=True
+                )
+                text = _postprocess(" ".join(s.text for s in segs).strip())
+            return (text, len(text)) if text else ("", 0)
+        except Exception:
+            return ("", 0)
+
+    # ---- PARTIAL: use whisper-tiny for speed ----
+    # Need at least ~0.5s of audio before trying
+    if audio_len < 16000 * 0.5:
+        return ("", 0)
+
+    try:
+        m, lk = get_tiny()
+        with lk:
+            segs, _ = m.transcribe(
+                audio,
+                beam_size=1,
+                without_timestamps=True,
+                condition_on_previous_text=False,
+                vad_filter=True
+            )
             text = _postprocess(" ".join(s.text for s in segs).strip())
 
-        if text:
-            if is_final:
-                return text, len(text)
-            else:
-                # Commit all but the last ~20 chars to minimize churn
-                return text, max(0, len(text) - 20)
+        # Kick off background shunyalabs transcription periodically
+        # Only re-kick if we have significantly more audio (>1.5s more)
+        if audio_len - _last_bg_kick > 16000 * 1.5:
+            if _bg_thread is None or not _bg_thread.is_alive():
+                _last_bg_kick = audio_len
+                audio_copy = audio.copy()
+                _bg_thread = threading.Thread(
+                    target=_bg_transcribe,
+                    args=(audio_copy, audio_len),
+                    daemon=True
+                )
+                _bg_thread.start()
 
-        return "", 0
+        if text:
+            # Commit all but the last ~15 chars to minimize churn
+            return (text, max(0, len(text) - 15))
+
+        return ("", 0)
     except Exception:
-        return "", 0
+        return ("", 0)
+
 
 # ===========================================================================
-# Warmup — ensure models download/load on import before network is blocked.
-# MUST be synchronous so stream_server waits for them before printing READY.
+# Warmup — load both models before network is blocked.
+# MUST be synchronous so stream_server waits before printing READY.
 # ===========================================================================
 get_tiny()
-get_small()
-
+get_shunyalabs()
