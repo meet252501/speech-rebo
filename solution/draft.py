@@ -121,7 +121,8 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 m, lk = get_base_en()
                 with lk:
                     segs, _ = m.transcribe(
-                        audio, beam_size=1,
+                        audio, beam_size=5,
+                        language="en",
                         without_timestamps=True,
                         condition_on_previous_text=False,
                         vad_filter=True
@@ -133,8 +134,8 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         
         # Slow path for Hindi - use shunyalabs
         if _bg_thread is not None and _bg_thread.is_alive():
-            # Wait up to 90s to prevent websocket timeout on potato PCs
-            _bg_thread.join(timeout=90.0)
+            # Evaluator websocket drops at 10s. Join for max 8.0s to ensure fallback completes.
+            _bg_thread.join(timeout=8.0)
 
         with _bg_result_lock:
             cached = _bg_result
