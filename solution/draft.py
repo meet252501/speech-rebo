@@ -75,6 +75,7 @@ _clip_needs_shunyalabs = False
 _last_bg_kick = 0
 _prev_text = ""
 _committed = ""
+_clip_id = 0
 
 def _common_word_prefix(left: str, right: str) -> str:
     lw = re.findall(r"[\w'.-]+", left, flags=re.UNICODE)
@@ -87,8 +88,8 @@ def _common_word_prefix(left: str, right: str) -> str:
     return " ".join(out)
 
 
-def _bg_transcribe(audio_float: _np.ndarray, audio_len: int):
-    global _bg_result, _bg_audio_len
+def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
+    global _bg_result, _bg_audio_len, _clip_id
     try:
         m, lk = get_shunyalabs()
         with lk:
@@ -101,7 +102,7 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int):
             )
             text = _postprocess(" ".join(s.text for s in segs).strip())
         with _bg_result_lock:
-            if audio_len >= _bg_audio_len:
+            if my_clip_id == _clip_id and audio_len >= _bg_audio_len:
                 _bg_result = text
                 _bg_audio_len = audio_len
     except Exception:
@@ -109,10 +110,11 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int):
 
 
 def draft_reset():
-    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _committed
+    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _committed, _clip_id
     with _bg_result_lock:
         _bg_result = None
         _bg_audio_len = 0
+        _clip_id += 1
     _bg_thread = None
     _last_bg_kick = 0
     _clip_needs_shunyalabs = False
@@ -233,7 +235,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                     audio_copy = audio.copy()
                     _bg_thread = threading.Thread(
                         target=_bg_transcribe,
-                        args=(audio_copy, audio_len),
+                        args=(audio_copy, audio_len, _clip_id),
                         daemon=True
                     )
                     _bg_thread.start()
