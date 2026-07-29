@@ -74,18 +74,18 @@ _bg_audio_len = 0
 _clip_needs_shunyalabs = False
 _last_bg_kick = 0
 _prev_text = ""
-_committed = ""
 _clip_id = 0
+_last_stable_idx = 0
 
-def _common_word_prefix(left: str, right: str) -> str:
-    lw = re.findall(r"[\w'.-]+", left, flags=re.UNICODE)
-    rw = re.findall(r"[\w'.-]+", right, flags=re.UNICODE)
-    out = []
+def _stable_length(left: str, right: str) -> int:
+    lw = list(re.finditer(r"[\w'.-]+", left, flags=re.UNICODE))
+    rw = list(re.finditer(r"[\w'.-]+", right, flags=re.UNICODE))
+    match_idx = 0
     for a, b in zip(lw, rw):
-        if a.lower() != b.lower():
+        if a.group().lower() != b.group().lower():
             break
-        out.append(b)
-    return " ".join(out)
+        match_idx = b.end()
+    return match_idx
 
 
 def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
@@ -110,7 +110,7 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
 
 
 def draft_reset():
-    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _committed, _clip_id
+    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _last_stable_idx, _clip_id
     with _bg_result_lock:
         _bg_result = None
         _bg_audio_len = 0
@@ -119,11 +119,11 @@ def draft_reset():
     _last_bg_kick = 0
     _clip_needs_shunyalabs = False
     _prev_text = ""
-    _committed = ""
+    _last_stable_idx = 0
 
 
 def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
-    global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _committed
+    global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _last_stable_idx
 
     audio = _np.frombuffer(chunk_bytes, _np.int16).flatten().astype(_np.float32) / 32768.0
     audio_len = len(audio)
@@ -241,11 +241,10 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                     _bg_thread.start()
 
         if text:
-            stable = _common_word_prefix(_prev_text, text)
-            if len(stable) >= len(_committed):
-                _committed = stable
+            stable_len = _stable_length(_prev_text, text)
+            _last_stable_idx = max(_last_stable_idx, stable_len)
             _prev_text = text
-            return (text, len(_committed))
+            return (text, _last_stable_idx)
 
         return ("", 0)
     except Exception:
