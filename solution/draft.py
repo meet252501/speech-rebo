@@ -1,6 +1,7 @@
 
 import os
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+import sys
 import re
 import numpy as _np
 import threading
@@ -17,39 +18,44 @@ _shunyalabs_lock = threading.Lock()
 
 def get_tiny():
     global _model_tiny
+    # On the evaluator's M1 Pro (6P + 2E), using 8 threads causes E-core bottlenecking. 
+    # 6 threads exactly pins the Performance cores for maximum speed.
+    threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
     if _model_tiny is None:
         with _tiny_lock:
             if _model_tiny is None:
                 _model_tiny = WhisperModel(
                     "whisper_tiny_ct2",
                     device="auto", compute_type="int8",
-                    cpu_threads=max(4, os.cpu_count() or 4), local_files_only=True
+                    cpu_threads=threads, local_files_only=True
                 )
     return _model_tiny, _tiny_lock
 
 
 def get_base_en():
     global _model_base_en
+    threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
     if _model_base_en is None:
         with _base_en_lock:
             if _model_base_en is None:
                 _model_base_en = WhisperModel(
                     "whisper_base_en_ct2",
                     device="auto", compute_type="int8",
-                    cpu_threads=max(4, os.cpu_count() or 4), local_files_only=True
+                    cpu_threads=threads, local_files_only=True
                 )
     return _model_base_en, _base_en_lock
 
 
 def get_shunyalabs():
     global _model_shunyalabs
+    threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
     if _model_shunyalabs is None:
         with _shunyalabs_lock:
             if _model_shunyalabs is None:
                 _model_shunyalabs = WhisperModel(
                     "shunyalabs_zero_stt_ct2",
                     device="auto", compute_type="int8",
-                    cpu_threads=max(4, os.cpu_count() or 4), local_files_only=True
+                    cpu_threads=threads, local_files_only=True
                 )
     return _model_shunyalabs, _shunyalabs_lock
 
