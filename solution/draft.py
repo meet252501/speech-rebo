@@ -254,7 +254,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 m, lk = get_base_en()
                 with lk:
                     segs, _ = m.transcribe(
-                        audio, beam_size=1,
+                        audio, beam_size=5,
                         language="en",
                         without_timestamps=True,
                         condition_on_previous_text=False,
@@ -290,10 +290,10 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             m, lk = get_shunyalabs_fg()
             with lk:
                 if _clip_is_pure_hindi:
-                    segs, _ = m.transcribe(audio, **_pure_hindi_kwargs())
+                    segs, _ = m.transcribe(audio, **{**_pure_hindi_kwargs(), "beam_size": 3})
                 else:
                     segs, _ = m.transcribe(
-                        audio, **_hinglish_kwargs(_partial_english_words)
+                        audio, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 3}
                     )
                 text = _postprocess(" ".join(s.text for s in segs).strip())
 
