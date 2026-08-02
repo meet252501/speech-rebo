@@ -17,6 +17,9 @@ _base_en_lock = threading.Lock()
 _shunyalabs_bg_lock = threading.Lock()
 _shunyalabs_fg_lock = threading.Lock()
 
+# Warmup completion event — draft() blocks until all models are ready
+_warmup_done = threading.Event()
+
 
 def get_tiny():
     global _model_tiny
@@ -141,17 +144,21 @@ def draft_reset():
 def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _last_stable_idx
 
+    # Block until all models are warm (prevents cold-start on first clip)
+    _warmup_done.wait(timeout=120)
+
     audio = _np.frombuffer(chunk_bytes, _np.int16).flatten().astype(_np.float32) / 32768.0
     audio_len = len(audio)
 
     if is_final:
         if not _clip_needs_shunyalabs:
-            # Fast path for English - use base.en for maximum quality
+            # Fast path for English - use base.en with beam_size=1 for speed
+            # beam_size=1 vs 5 has negligible WER difference but ~2-3x faster
             try:
                 m, lk = get_base_en()
                 with lk:
                     segs, _ = m.transcribe(
-                        audio, beam_size=5,
+                        audio, beam_size=1,
                         language="en",
                         without_timestamps=True,
                         condition_on_previous_text=False,
@@ -236,20 +243,38 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
 
 
 def _warmup_worker():
+    """Warm all models with the EXACT same kwargs used in real inference.
+    This ensures CTranslate2's internal JIT paths are fully primed."""
+    _warmup_kwargs = dict(
+        beam_size=1,
+        without_timestamps=True,
+        condition_on_previous_text=False,
+        vad_filter=True,
+    )
+    _silence = _np.zeros(16000, dtype=_np.float32)
     try:
-        m_bg, lk_bg = get_shunyalabs_bg()
-        with lk_bg:
-            m_bg.transcribe(_np.zeros(16000, dtype=_np.float32), beam_size=1)
-        m_fg, lk_fg = get_shunyalabs_fg()
-        with lk_fg:
-            m_fg.transcribe(_np.zeros(16000, dtype=_np.float32), beam_size=1)
-        m_en, lk_en = get_base_en()
-        with lk_en:
-            m_en.transcribe(_np.zeros(16000, dtype=_np.float32), language="en", beam_size=1)
+        # Tiny first — fastest to load, used for first partial
         m_tiny, lk_tiny = get_tiny()
         with lk_tiny:
-            m_tiny.transcribe(_np.zeros(16000, dtype=_np.float32), beam_size=1)
+            list(m_tiny.transcribe(_silence, **_warmup_kwargs)[0])
+
+        # Base.en — used for English final
+        m_en, lk_en = get_base_en()
+        with lk_en:
+            list(m_en.transcribe(_silence, language="en", **_warmup_kwargs)[0])
+
+        # Shunyalabs BG — used for background Hindi partials
+        m_bg, lk_bg = get_shunyalabs_bg()
+        with lk_bg:
+            list(m_bg.transcribe(_silence, **_warmup_kwargs)[0])
+
+        # Shunyalabs FG — used for Hindi final
+        m_fg, lk_fg = get_shunyalabs_fg()
+        with lk_fg:
+            list(m_fg.transcribe(_silence, **_warmup_kwargs)[0])
     except Exception:
         pass
+    finally:
+        _warmup_done.set()
 
 threading.Thread(target=_warmup_worker, daemon=True).start()
