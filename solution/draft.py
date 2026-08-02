@@ -356,10 +356,11 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     # Skip re-transcription on long audio to free CPU for faster final
     if audio_len > 16000 * 7 and _prev_text:
         if _clip_needs_shunyalabs:
-            if audio_len - _last_bg_kick > 16000 * 1.5:
-                if _bg_thread is None or not _bg_thread.is_alive():
-                    _last_bg_kick = audio_len
-                    audio_copy = audio.copy()
+            if audio_len > 16000 * 12.0:
+                if audio_len - _last_bg_kick > 16000 * 2.0:
+                    if _bg_thread is None or not _bg_thread.is_alive():
+                        _last_bg_kick = audio_len
+                        audio_copy = audio.copy()
                     _bg_thread = threading.Thread(
                         target=_bg_transcribe,
                         args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
@@ -411,10 +412,11 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             _clip_is_pure_hindi = (_partial_count >= 2 and len(_partial_english_words) < 2)
 
         if _clip_needs_shunyalabs:
-            if audio_len - _last_bg_kick > 16000 * 1.5:
-                if _bg_thread is None or not _bg_thread.is_alive():
-                    _last_bg_kick = audio_len
-                    audio_copy = audio.copy()
+            if audio_len > 16000 * 12.0:
+                if audio_len - _last_bg_kick > 16000 * 2.0:
+                    if _bg_thread is None or not _bg_thread.is_alive():
+                        _last_bg_kick = audio_len
+                        audio_copy = audio.copy()
                     _bg_thread = threading.Thread(
                         target=_bg_transcribe,
                         args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),

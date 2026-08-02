@@ -232,9 +232,10 @@ async def _evaluate(manifest_path: str, server_module: str, runs: int,
 
     base = os.path.dirname(os.path.abspath(manifest_path))
     for c in manifest:
-        wav = c.get("audio_local") or os.path.join(base, os.path.basename(c.get("audio", c["clip_id"] + ".wav")))
+        wav_name = os.path.basename(c.get("audio", c["clip_id"] + ".wav"))
+        wav = c.get("audio_local") or os.path.join(base, "audio", wav_name)
         if not os.path.exists(wav):
-            wav = os.path.join(base, c["clip_id"] + ".wav")
+            wav = os.path.join(base, wav_name)
         c["_wav"] = wav
 
     port = _free_port()
