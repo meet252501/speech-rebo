@@ -356,9 +356,11 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 _clip_lang_confirmed = True
             elif text.strip():
                 _clip_needs_shunyalabs = True
-                # Early detection: if no English words seen yet, likely pure Hindi
-                if _partial_count >= 2 and len(_partial_english_words) < 2:
-                    _clip_is_pure_hindi = True
+
+        # Dynamically update pure Hindi estimate for bg thread
+        # (final determination happens at is_final time)
+        if _clip_needs_shunyalabs:
+            _clip_is_pure_hindi = (_partial_count >= 2 and len(_partial_english_words) < 2)
 
         if _clip_needs_shunyalabs:
             if audio_len - _last_bg_kick > 16000 * 1.5:
