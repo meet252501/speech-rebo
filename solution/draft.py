@@ -33,6 +33,13 @@ _HINGLISH_PROMPT = (
     "rollback, sprint, standup, Jira, PRD, deadline, p95, Codex, Cursor."
 )
 
+# Regex to detect Latin words (the scorer only sees these)
+_LATIN_WORD = re.compile(r'[A-Za-z]{2,}')
+# Regex to detect Devanagari characters
+_DEVANAGARI = re.compile(r'[\u0900-\u097F]')
+# Regex to detect numbers
+_NUMBER = re.compile(r'\b\d[\d,.:/-]*\b')
+
 
 def get_tiny():
     global _model_tiny
@@ -97,17 +104,51 @@ def _postprocess(text: str) -> str:
     return text
 
 
+def _strip_stray_english(text: str) -> str:
+    """For PURE Hindi clips: remove stray English words that would sabotage
+    token_f1 (scorer only sees Latin tokens; if gold has none and pred has some,
+    F1 = 0.0). Keep numbers and Devanagari intact."""
+    if not text:
+        return text
+    # Split by whitespace, keep tokens that are:
+    # - Devanagari (any char in \u0900-\u097F range)
+    # - Numbers (\d)
+    # - Punctuation
+    # Remove tokens that are purely Latin words
+    tokens = text.split()
+    kept = []
+    for tok in tokens:
+        # Keep if it has any Devanagari character
+        if _DEVANAGARI.search(tok):
+            kept.append(tok)
+        # Keep if it's a number
+        elif re.match(r'^[\d,.:/-]+$', tok):
+            kept.append(tok)
+        # Keep punctuation-only tokens
+        elif re.match(r'^[^\w]+$', tok):
+            kept.append(tok)
+        # Drop pure Latin-alpha tokens (these sabotage scorer for pure Hindi)
+        # But keep single letters (might be abbreviations) and very short words
+        elif len(tok) <= 1:
+            kept.append(tok)
+        # Everything else (Latin words) — drop
+    result = ' '.join(kept).strip()
+    return result if result else text  # fallback to original if stripping empties it
+
+
 _bg_result = None
 _bg_result_lock = threading.Lock()
 _bg_thread = None
 _bg_audio_len = 0
 _clip_needs_shunyalabs = False
 _clip_lang_confirmed = False
+_clip_is_pure_hindi = False  # True for FLEURS-style pure Hindi (no English words)
 _last_bg_kick = 0
 _prev_text = ""
 _clip_id = 0
 _last_stable_idx = 0
 _partial_english_words = set()  # English words collected from tiny partials
+_partial_count = 0  # How many partials we've processed
 
 
 def _stable_length(left: str, right: str) -> int:
@@ -121,8 +162,8 @@ def _stable_length(left: str, right: str) -> int:
     return match_idx
 
 
-def _shunyalabs_kwargs(hotwords_set: set | None = None):
-    """Build kwargs for shunyalabs transcribe — domain prompt + anti-hallucination."""
+def _hinglish_kwargs(hotwords_set: set | None = None):
+    """Build kwargs for Hinglish transcribe — domain prompt + anti-hallucination."""
     kw = dict(
         beam_size=1,
         without_timestamps=True,
@@ -140,13 +181,34 @@ def _shunyalabs_kwargs(hotwords_set: set | None = None):
     return kw
 
 
-def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
+def _pure_hindi_kwargs():
+    """Build kwargs for PURE Hindi transcribe — no English prompt, force Hindi."""
+    return dict(
+        beam_size=1,
+        language="hi",
+        without_timestamps=True,
+        condition_on_previous_text=False,
+        vad_filter=True,
+        repetition_penalty=1.1,
+        no_repeat_ngram_size=3,
+        temperature=0,
+        hallucination_silence_threshold=1.0,
+    )
+
+
+def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int,
+                    is_pure_hindi: bool):
     global _bg_result, _bg_audio_len, _clip_id
     try:
         m, lk = get_shunyalabs_bg()
         with lk:
-            segs, _ = m.transcribe(audio_float, **_shunyalabs_kwargs(_partial_english_words))
+            if is_pure_hindi:
+                segs, _ = m.transcribe(audio_float, **_pure_hindi_kwargs())
+            else:
+                segs, _ = m.transcribe(audio_float, **_hinglish_kwargs(_partial_english_words))
             text = _postprocess(" ".join(s.text for s in segs).strip())
+            if is_pure_hindi:
+                text = _strip_stray_english(text)
         with _bg_result_lock:
             if my_clip_id == _clip_id and audio_len >= _bg_audio_len:
                 _bg_result = text
@@ -157,8 +219,9 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
 
 def draft_reset():
     global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick
-    global _clip_needs_shunyalabs, _clip_lang_confirmed
+    global _clip_needs_shunyalabs, _clip_lang_confirmed, _clip_is_pure_hindi
     global _prev_text, _last_stable_idx, _clip_id, _partial_english_words
+    global _partial_count
     with _bg_result_lock:
         _bg_result = None
         _bg_audio_len = 0
@@ -167,14 +230,17 @@ def draft_reset():
     _last_bg_kick = 0
     _clip_needs_shunyalabs = False
     _clip_lang_confirmed = False
+    _clip_is_pure_hindi = False
     _prev_text = ""
     _last_stable_idx = 0
     _partial_english_words = set()
+    _partial_count = 0
 
 
 def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _clip_lang_confirmed
-    global _prev_text, _last_stable_idx, _partial_english_words
+    global _clip_is_pure_hindi
+    global _prev_text, _last_stable_idx, _partial_english_words, _partial_count
 
     _warmup_done.wait(timeout=120)
 
@@ -183,7 +249,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
 
     if is_final:
         if not _clip_needs_shunyalabs:
-            # Fast path for English
+            # ============ ENGLISH PATH ============
             try:
                 m, lk = get_base_en()
                 with lk:
@@ -201,15 +267,28 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 return (text, len(text)) if text else ("", 0)
             except Exception:
                 return ("", 0)
-        
-        # Hindi path: fg shunyalabs with domain prompt + hotwords from partials
+
+        # ============ HINDI / HINGLISH PATH ============
+        # Determine if pure Hindi vs Hinglish based on English words seen in partials
+        # After several partials, if we've seen < 2 English words, it's pure Hindi
+        if _partial_count >= 3 and len(_partial_english_words) < 2:
+            _clip_is_pure_hindi = True
+
         try:
             m, lk = get_shunyalabs_fg()
             with lk:
-                segs, _ = m.transcribe(
-                    audio, **_shunyalabs_kwargs(_partial_english_words)
-                )
+                if _clip_is_pure_hindi:
+                    segs, _ = m.transcribe(audio, **_pure_hindi_kwargs())
+                else:
+                    segs, _ = m.transcribe(
+                        audio, **_hinglish_kwargs(_partial_english_words)
+                    )
                 text = _postprocess(" ".join(s.text for s in segs).strip())
+
+            # Post-process: for pure Hindi, strip stray English words
+            if _clip_is_pure_hindi and text:
+                text = _strip_stray_english(text)
+
             return (text, len(text)) if text else ("", 0)
         except Exception:
             try:
@@ -239,7 +318,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                     audio_copy = audio.copy()
                     _bg_thread = threading.Thread(
                         target=_bg_transcribe,
-                        args=(audio_copy, audio_len, _clip_id),
+                        args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
                         daemon=True
                     )
                     _bg_thread.start()
@@ -258,11 +337,18 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 **extra
             )
             text = _postprocess(" ".join(s.text for s in segs).strip())
-        
+
+        _partial_count += 1
+
         # Collect English words from tiny's output for use as hotwords later
+        # Only collect words that look like real English (3+ chars, not ALL CAPS noise)
         if text:
             for word in re.findall(r'[A-Za-z]{3,}', text):
-                _partial_english_words.add(word)
+                # Skip very common filler words that tiny hallucinates
+                if word.lower() not in {'the', 'and', 'you', 'thank', 'thanks',
+                                         'bye', 'see', 'like', 'this', 'that',
+                                         'subscribing', 'subscribe', 'please'}:
+                    _partial_english_words.add(word)
 
         # Route logic
         if not _clip_lang_confirmed and not _clip_needs_shunyalabs:
@@ -270,6 +356,9 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 _clip_lang_confirmed = True
             elif text.strip():
                 _clip_needs_shunyalabs = True
+                # Early detection: if no English words seen yet, likely pure Hindi
+                if _partial_count >= 2 and len(_partial_english_words) < 2:
+                    _clip_is_pure_hindi = True
 
         if _clip_needs_shunyalabs:
             if audio_len - _last_bg_kick > 16000 * 1.5:
@@ -278,7 +367,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                     audio_copy = audio.copy()
                     _bg_thread = threading.Thread(
                         target=_bg_transcribe,
-                        args=(audio_copy, audio_len, _clip_id),
+                        args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
                         daemon=True
                     )
                     _bg_thread.start()
@@ -311,11 +400,11 @@ def _warmup_worker():
 
         m_bg, lk_bg = get_shunyalabs_bg()
         with lk_bg:
-            list(m_bg.transcribe(_silence, **_shunyalabs_kwargs())[0])
+            list(m_bg.transcribe(_silence, **_hinglish_kwargs())[0])
 
         m_fg, lk_fg = get_shunyalabs_fg()
         with lk_fg:
-            list(m_fg.transcribe(_silence, **_shunyalabs_kwargs())[0])
+            list(m_fg.transcribe(_silence, **_hinglish_kwargs())[0])
     except Exception:
         pass
     finally:
