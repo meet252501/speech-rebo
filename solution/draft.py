@@ -274,6 +274,18 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         if _partial_count >= 3 and len(_partial_english_words) < 2:
             _clip_is_pure_hindi = True
 
+        # For long audio, prefer the bg result (computed on earlier chunk)
+        # to avoid 10+ second fg transcription that could timeout.
+        # Latency bar is 5000ms; shunyalabs medium on >7s audio can exceed this.
+        if audio_len > 16000 * 7:
+            # Wait briefly for bg thread to finish — it has a head start
+            if _bg_thread is not None and _bg_thread.is_alive():
+                _bg_thread.join(timeout=3.0)
+            with _bg_result_lock:
+                if _bg_result:
+                    return (_bg_result, len(_bg_result))
+            # No bg result available — must run fg (risky but no choice)
+
         try:
             m, lk = get_shunyalabs_fg()
             with lk:
@@ -289,8 +301,18 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             if _clip_is_pure_hindi and text:
                 text = _strip_stray_english(text)
 
-            return (text, len(text)) if text else ("", 0)
+            if text:
+                return (text, len(text))
+            # fg produced empty — try bg result as fallback
+            with _bg_result_lock:
+                if _bg_result:
+                    return (_bg_result, len(_bg_result))
+            return ("", 0)
         except Exception:
+            # fg failed — try bg result first, then tiny
+            with _bg_result_lock:
+                if _bg_result:
+                    return (_bg_result, len(_bg_result))
             try:
                 m, lk = get_tiny()
                 with lk:
