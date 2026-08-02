@@ -149,6 +149,7 @@ _clip_id = 0
 _last_stable_idx = 0
 _partial_english_words = set()  # English words collected from tiny partials
 _partial_count = 0  # How many partials we've processed
+_last_language_guess = "en"
 
 
 def _stable_length(left: str, right: str) -> int:
@@ -235,12 +236,14 @@ def draft_reset():
     _last_stable_idx = 0
     _partial_english_words = set()
     _partial_count = 0
+    _last_language_guess = "en"
 
 
 def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _clip_lang_confirmed
     global _clip_is_pure_hindi
     global _prev_text, _last_stable_idx, _partial_english_words, _partial_count
+    global _last_language_guess
 
     _warmup_done.wait(timeout=120)
 
@@ -248,6 +251,10 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     audio_len = len(audio)
 
     if is_final:
+        if not _clip_lang_confirmed and not _clip_needs_shunyalabs:
+            if _last_language_guess != "en":
+                _clip_needs_shunyalabs = True
+
         if not _clip_needs_shunyalabs:
             # ============ ENGLISH PATH ============
             try:
@@ -274,10 +281,9 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         if _partial_count >= 3 and len(_partial_english_words) < 2:
             _clip_is_pure_hindi = True
 
-        # For long audio, prefer the bg result (computed on earlier chunk)
-        # to avoid 10+ second fg transcription that could timeout.
-        # Latency bar is 5000ms; shunyalabs medium on >7s audio can exceed this.
-        if audio_len > 16000 * 7:
+        # For extremely long audio (>12s), prefer the bg result (computed on earlier chunk)
+        # to avoid slow fg transcription that could timeout.
+        if audio_len > 16000 * 12:
             # Wait briefly for bg thread to finish — it has a head start
             if _bg_thread is not None and _bg_thread.is_alive():
                 _bg_thread.join(timeout=3.0)
@@ -359,6 +365,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 **extra
             )
             text = _postprocess(" ".join(s.text for s in segs).strip())
+            _last_language_guess = info.language
 
         _partial_count += 1
 
@@ -372,12 +379,15 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                                          'subscribing', 'subscribe', 'please'}:
                     _partial_english_words.add(word)
 
-        # Route logic
+        # Route logic: avoid noisy first-chunk misclassification
         if not _clip_lang_confirmed and not _clip_needs_shunyalabs:
-            if info.language == "en":
-                _clip_lang_confirmed = True
-            elif text.strip():
+            if _DEVANAGARI.search(text):
                 _clip_needs_shunyalabs = True
+            elif text.strip() and audio_len >= 16000 * 1.5:
+                if info.language == "en":
+                    _clip_lang_confirmed = True
+                else:
+                    _clip_needs_shunyalabs = True
 
         # Dynamically update pure Hindi estimate for bg thread
         # (final determination happens at is_final time)
