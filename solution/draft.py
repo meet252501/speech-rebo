@@ -91,6 +91,7 @@ _bg_result_lock = threading.Lock()
 _bg_thread = None
 _bg_audio_len = 0
 _clip_needs_shunyalabs = False
+_clip_lang_confirmed = False      # True once language is confirmed English
 _last_bg_kick = 0
 _prev_text = ""
 _clip_id = 0
@@ -129,7 +130,9 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
 
 
 def draft_reset():
-    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _last_stable_idx, _clip_id
+    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick
+    global _clip_needs_shunyalabs, _clip_lang_confirmed
+    global _prev_text, _last_stable_idx, _clip_id
     with _bg_result_lock:
         _bg_result = None
         _bg_audio_len = 0
@@ -137,12 +140,14 @@ def draft_reset():
     _bg_thread = None
     _last_bg_kick = 0
     _clip_needs_shunyalabs = False
+    _clip_lang_confirmed = False
     _prev_text = ""
     _last_stable_idx = 0
 
 
 def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
-    global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _prev_text, _last_stable_idx
+    global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _clip_lang_confirmed
+    global _prev_text, _last_stable_idx
 
     # Block until all models are warm (prevents cold-start on first clip)
     _warmup_done.wait(timeout=120)
@@ -153,7 +158,6 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     if is_final:
         if not _clip_needs_shunyalabs:
             # Fast path for English - use base.en with beam_size=1 for speed
-            # beam_size=1 vs 5 has negligible WER difference but ~2-3x faster
             try:
                 m, lk = get_base_en()
                 with lk:
@@ -169,7 +173,8 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             except Exception:
                 return ("", 0)
         
-        # Slow path for Hindi - use dedicated fg instance to avoid lock contention with bg thread
+        # Hindi path: run fg synchronously on full audio for best quality.
+        # fg model is a separate instance — no lock contention with bg thread.
         try:
             m, lk = get_shunyalabs_fg()
             with lk:
@@ -183,7 +188,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 text = _postprocess(" ".join(s.text for s in segs).strip())
             return (text, len(text)) if text else ("", 0)
         except Exception:
-            # Absolute last resort
+            # Last resort: tiny
             try:
                 m, lk = get_tiny()
                 with lk:
@@ -202,21 +207,45 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     if audio_len < 16000 * 0.5:
         return ("", 0)
 
+    # OPTIMIZATION: On long audio (>7s), skip re-transcription to free the CPU
+    # for faster final processing. Return cached text to avoid blocking the
+    # event loop right before the "end" message arrives. Saves ~0.5-1s on e2f.
+    if audio_len > 16000 * 7 and _prev_text:
+        # Still kick bg thread for Hindi if needed
+        if _clip_needs_shunyalabs:
+            if audio_len - _last_bg_kick > 16000 * 1.5:
+                if _bg_thread is None or not _bg_thread.is_alive():
+                    _last_bg_kick = audio_len
+                    audio_copy = audio.copy()
+                    _bg_thread = threading.Thread(
+                        target=_bg_transcribe,
+                        args=(audio_copy, audio_len, _clip_id),
+                        daemon=True
+                    )
+                    _bg_thread.start()
+        return (_prev_text, _last_stable_idx)
+
     try:
         m, lk = get_tiny()
         with lk:
+            # After confirming English, skip language detection for faster partials
+            extra = {"language": "en"} if _clip_lang_confirmed else {}
             segs, info = m.transcribe(
                 audio,
                 beam_size=1,
                 without_timestamps=True,
                 condition_on_previous_text=False,
-                vad_filter=True
+                vad_filter=True,
+                **extra
             )
             text = _postprocess(" ".join(s.text for s in segs).strip())
         
-        # Route logic: if it's not English and actually contains speech, mark as needs shunyalabs
-        if info.language != "en" and text.strip():
-            _clip_needs_shunyalabs = True
+        # Route logic: detect language once, then lock in
+        if not _clip_lang_confirmed and not _clip_needs_shunyalabs:
+            if info.language == "en":
+                _clip_lang_confirmed = True
+            elif text.strip():
+                _clip_needs_shunyalabs = True
 
         if _clip_needs_shunyalabs:
             # Kick off background shunyalabs transcription periodically
