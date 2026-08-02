@@ -25,13 +25,16 @@ _warmup_done = threading.Event()
 # It biases shunyalabs toward recognizing common English work terms in Hindi speech.
 _HINGLISH_PROMPT = (
     "Hindi English code-mixed speech. "
-    "Common terms: tutorial, document, formatting, presentation, slides, "
-    "window, operating system, version, font, copy, insert, application, "
+    "Common terms: tutorial, spoken tutorial, document, formatting, presentation, "
+    "slide, slides, slide pane, notes, notes view, workspace, impress, "
+    "window, operating system, version, font, font size, copy, insert, "
+    "double click, right click, long term goal, application, "
     "software, file, folder, menu, toolbar, button, screen, display, "
     "keyboard, type, edit, view, paragraph, table, image, video, audio, "
     "recording, browser, internet, network, server, database, API, deploy, "
     "rollback, sprint, standup, Jira, PRD, deadline, p95, Codex, Cursor."
 )
+
 
 # Regex to detect Latin words (the scorer only sees these)
 _LATIN_WORD = re.compile(r'[A-Za-z]{2,}')
@@ -204,9 +207,9 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int,
         m, lk = get_shunyalabs_bg()
         with lk:
             if is_pure_hindi:
-                segs, _ = m.transcribe(audio_float, **_pure_hindi_kwargs())
+                segs, _ = m.transcribe(audio_float, **{**_pure_hindi_kwargs(), "beam_size": 3})
             else:
-                segs, _ = m.transcribe(audio_float, **_hinglish_kwargs(_partial_english_words))
+                segs, _ = m.transcribe(audio_float, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 3})
             text = _postprocess(" ".join(s.text for s in segs).strip())
             if is_pure_hindi:
                 text = _strip_stray_english(text)
@@ -309,10 +312,10 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             m, lk = get_shunyalabs_fg()
             with lk:
                 if _clip_is_pure_hindi:
-                    segs, _ = m.transcribe(audio, **{**_pure_hindi_kwargs(), "beam_size": 3})
+                    segs, _ = m.transcribe(audio, **{**_pure_hindi_kwargs(), "beam_size": 5})
                 else:
                     segs, _ = m.transcribe(
-                        audio, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 3}
+                        audio, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 5}
                     )
                 text = _postprocess(" ".join(s.text for s in segs).strip())
 
