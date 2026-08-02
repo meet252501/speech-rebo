@@ -9,11 +9,13 @@ from faster_whisper import WhisperModel
 
 _model_tiny = None
 _model_base_en = None
-_model_shunyalabs = None
+_model_shunyalabs_bg = None
+_model_shunyalabs_fg = None
 
 _tiny_lock = threading.Lock()
 _base_en_lock = threading.Lock()
-_shunyalabs_lock = threading.Lock()
+_shunyalabs_bg_lock = threading.Lock()
+_shunyalabs_fg_lock = threading.Lock()
 
 
 def get_tiny():
@@ -46,18 +48,32 @@ def get_base_en():
     return _model_base_en, _base_en_lock
 
 
-def get_shunyalabs():
-    global _model_shunyalabs
+def get_shunyalabs_bg():
+    global _model_shunyalabs_bg
     threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
-    if _model_shunyalabs is None:
-        with _shunyalabs_lock:
-            if _model_shunyalabs is None:
-                _model_shunyalabs = WhisperModel(
+    if _model_shunyalabs_bg is None:
+        with _shunyalabs_bg_lock:
+            if _model_shunyalabs_bg is None:
+                _model_shunyalabs_bg = WhisperModel(
                     "shunyalabs_zero_stt_ct2",
                     device="auto", compute_type="int8",
                     cpu_threads=threads, local_files_only=True
                 )
-    return _model_shunyalabs, _shunyalabs_lock
+    return _model_shunyalabs_bg, _shunyalabs_bg_lock
+
+
+def get_shunyalabs_fg():
+    global _model_shunyalabs_fg
+    threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
+    if _model_shunyalabs_fg is None:
+        with _shunyalabs_fg_lock:
+            if _model_shunyalabs_fg is None:
+                _model_shunyalabs_fg = WhisperModel(
+                    "shunyalabs_zero_stt_ct2",
+                    device="auto", compute_type="int8",
+                    cpu_threads=threads, local_files_only=True
+                )
+    return _model_shunyalabs_fg, _shunyalabs_fg_lock
 
 
 def _postprocess(text: str) -> str:
@@ -91,7 +107,7 @@ def _stable_length(left: str, right: str) -> int:
 def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int):
     global _bg_result, _bg_audio_len, _clip_id
     try:
-        m, lk = get_shunyalabs()
+        m, lk = get_shunyalabs_bg()
         with lk:
             segs, _ = m.transcribe(
                 audio_float,
@@ -146,20 +162,21 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             except Exception:
                 return ("", 0)
         
-        # Slow path for Hindi - use shunyalabs
-        if _bg_thread is not None and _bg_thread.is_alive():
-            # Evaluator websocket drops at 10s. Join for max 8.0s to ensure fallback completes.
-            _bg_thread.join(timeout=8.0)
-
-        with _bg_result_lock:
-            cached = _bg_result
-
-        if cached:
-            return (cached, len(cached))
-
-        # Fallback: if we had no thread or it timed out without result, run shunyalabs ONLY IF we didn't just time out
-        # Actually to be safe on slow PCs, if it's still alive after 10s, it's a slow PC, fallback to tiny to avoid websocket drop
-        if _bg_thread is not None and _bg_thread.is_alive():
+        # Slow path for Hindi - use dedicated fg instance to avoid lock contention with bg thread
+        try:
+            m, lk = get_shunyalabs_fg()
+            with lk:
+                segs, _ = m.transcribe(
+                    audio,
+                    beam_size=1,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,
+                    vad_filter=True
+                )
+                text = _postprocess(" ".join(s.text for s in segs).strip())
+            return (text, len(text)) if text else ("", 0)
+        except Exception:
+            # Absolute last resort
             try:
                 m, lk = get_tiny()
                 with lk:
@@ -173,39 +190,6 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 return (text, len(text)) if text else ("", 0)
             except Exception:
                 return ("", 0)
-                
-        # If we reach here, there was no thread or thread finished but no result (error).
-        # We can try synchronous shunyalabs as last ditch
-        try:
-            m, lk = get_shunyalabs()
-            with lk:
-                segs, _ = m.transcribe(
-                    audio,
-                    beam_size=1,
-                    without_timestamps=True,
-                    condition_on_previous_text=False,
-                    vad_filter=True
-                )
-                text = _postprocess(" ".join(s.text for s in segs).strip())
-            if text:
-                return (text, len(text))
-        except Exception:
-            pass
-
-        # Absolute last resort
-        try:
-            m, lk = get_tiny()
-            with lk:
-                segs, _ = m.transcribe(
-                    audio, beam_size=1,
-                    without_timestamps=True,
-                    condition_on_previous_text=False,
-                    vad_filter=True
-                )
-                text = _postprocess(" ".join(s.text for s in segs).strip())
-            return (text, len(text)) if text else ("", 0)
-        except Exception:
-            return ("", 0)
 
     # ---- PARTIAL ----
     if audio_len < 16000 * 0.5:
@@ -251,5 +235,21 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         return ("", 0)
 
 
-get_tiny()
-get_shunyalabs()
+def _warmup_worker():
+    try:
+        m_bg, lk_bg = get_shunyalabs_bg()
+        with lk_bg:
+            m_bg.transcribe(_np.zeros(16000, dtype=_np.float32), beam_size=1)
+        m_fg, lk_fg = get_shunyalabs_fg()
+        with lk_fg:
+            m_fg.transcribe(_np.zeros(16000, dtype=_np.float32), beam_size=1)
+        m_en, lk_en = get_base_en()
+        with lk_en:
+            m_en.transcribe(_np.zeros(16000, dtype=_np.float32), language="en", beam_size=1)
+        m_tiny, lk_tiny = get_tiny()
+        with lk_tiny:
+            m_tiny.transcribe(_np.zeros(16000, dtype=_np.float32), beam_size=1)
+    except Exception:
+        pass
+
+threading.Thread(target=_warmup_worker, daemon=True).start()
