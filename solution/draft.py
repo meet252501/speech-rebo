@@ -222,7 +222,7 @@ def draft_reset():
     global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick
     global _clip_needs_shunyalabs, _clip_lang_confirmed, _clip_is_pure_hindi
     global _prev_text, _last_stable_idx, _clip_id, _partial_english_words
-    global _partial_count
+    global _partial_count, _last_language_guess
     with _bg_result_lock:
         _bg_result = None
         _bg_audio_len = 0
@@ -252,8 +252,21 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
 
     if is_final:
         if not _clip_lang_confirmed and not _clip_needs_shunyalabs:
-            if _last_language_guess != "en":
-                _clip_needs_shunyalabs = True
+            # We haven't decided yet. Run tiny on the full audio to get the best language guess.
+            try:
+                m, lk = get_tiny()
+                with lk:
+                    segs, info = m.transcribe(
+                        audio, beam_size=1, without_timestamps=True,
+                        condition_on_previous_text=False, vad_filter=True
+                    )
+                    text = _postprocess(" ".join(s.text for s in segs).strip())
+                    if _DEVANAGARI.search(text) or info.language != "en":
+                        _clip_needs_shunyalabs = True
+            except Exception:
+                # Fallback to whatever our last guess was
+                if _last_language_guess != "en":
+                    _clip_needs_shunyalabs = True
 
         if not _clip_needs_shunyalabs:
             # ============ ENGLISH PATH ============
