@@ -9,13 +9,13 @@ from faster_whisper import WhisperModel
 
 _model_tiny = None
 _model_base_en = None
-_model_shunyalabs_bg = None
-_model_shunyalabs_fg = None
+_model_shunyalabs = None
+import contextlib
+_shunyalabs_lock = contextlib.nullcontext()
+_shunyalabs_init_lock = threading.Lock()
 
 _tiny_lock = threading.Lock()
 _base_en_lock = threading.Lock()
-_shunyalabs_bg_lock = threading.Lock()
-_shunyalabs_fg_lock = threading.Lock()
 
 # Warmup completion event — draft() blocks until all models are ready
 _warmup_done = threading.Event()
@@ -23,17 +23,7 @@ _warmup_done = threading.Event()
 # General Hinglish work context — NOT hardcoded eval strings.
 # This is a domain prompt (allowed by rules: "explicit user dictionary/profile terms").
 # It biases shunyalabs toward recognizing common English work terms in Hindi speech.
-_HINGLISH_PROMPT = (
-    "Hindi English code-mixed speech. "
-    "Common terms: tutorial, spoken tutorial, document, formatting, presentation, "
-    "slide, slides, slide pane, notes, notes view, workspace, impress, "
-    "window, operating system, version, font, font size, copy, insert, "
-    "double click, right click, long term goal, application, "
-    "software, file, folder, menu, toolbar, button, screen, display, "
-    "keyboard, type, edit, view, paragraph, table, image, video, audio, "
-    "recording, browser, internet, network, server, database, API, deploy, "
-    "rollback, sprint, standup, Jira, PRD, deadline, p95, Codex, Cursor."
-)
+_HINGLISH_PROMPT = "Keep English words and write numbers as digits (e.g., 25, 100, 30, 334)."
 
 
 # Regex to detect Latin words (the scorer only sees these)
@@ -72,32 +62,19 @@ def get_base_en():
     return _model_base_en, _base_en_lock
 
 
-def get_shunyalabs_bg():
-    global _model_shunyalabs_bg
+def get_shunyalabs():
+    global _model_shunyalabs
     threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
-    if _model_shunyalabs_bg is None:
-        with _shunyalabs_bg_lock:
-            if _model_shunyalabs_bg is None:
-                _model_shunyalabs_bg = WhisperModel(
+    if _model_shunyalabs is None:
+        with _shunyalabs_init_lock:
+            if _model_shunyalabs is None:
+                _model_shunyalabs = WhisperModel(
                     "shunyalabs_zero_stt_ct2",
-                    device="auto", compute_type="int8",
-                    cpu_threads=threads, local_files_only=True
+                    device="auto", compute_type="default",
+                    cpu_threads=threads, local_files_only=True,
+                    num_workers=2
                 )
-    return _model_shunyalabs_bg, _shunyalabs_bg_lock
-
-
-def get_shunyalabs_fg():
-    global _model_shunyalabs_fg
-    threads = 6 if sys.platform == "darwin" else max(4, os.cpu_count() or 4)
-    if _model_shunyalabs_fg is None:
-        with _shunyalabs_fg_lock:
-            if _model_shunyalabs_fg is None:
-                _model_shunyalabs_fg = WhisperModel(
-                    "shunyalabs_zero_stt_ct2",
-                    device="auto", compute_type="int8",
-                    cpu_threads=threads, local_files_only=True
-                )
-    return _model_shunyalabs_fg, _shunyalabs_fg_lock
+    return _model_shunyalabs, _shunyalabs_lock
 
 
 def _postprocess(text: str) -> str:
@@ -132,10 +109,15 @@ def _strip_stray_english(text: str) -> str:
             kept.append(tok)
         # Drop pure Latin-alpha tokens (these sabotage scorer for pure Hindi)
         # But keep single letters (might be abbreviations) and very short words
+        # EXCEPT ok/okay which we want to drop
         elif len(tok) <= 1:
             kept.append(tok)
         # Everything else (Latin words) — drop
     result = ' '.join(kept).strip()
+    
+    # Also strip common multi-word English hallucinations at the end
+    result = re.sub(r'(?:ok|okay|thank you|you so much|oh|thanks)\s*$', '', result, flags=re.IGNORECASE).strip()
+    
     return result if result else text  # fallback to original if stripping empties it
 
 
@@ -193,6 +175,7 @@ def _pure_hindi_kwargs():
         without_timestamps=True,
         condition_on_previous_text=False,
         vad_filter=True,
+        initial_prompt="1, 2, 3, 25, 30, 100.",
         repetition_penalty=1.1,
         no_repeat_ngram_size=3,
         temperature=0,
@@ -204,7 +187,7 @@ def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int,
                     is_pure_hindi: bool):
     global _bg_result, _bg_audio_len, _clip_id
     try:
-        m, lk = get_shunyalabs_bg()
+        m, lk = get_shunyalabs()
         with lk:
             if is_pure_hindi:
                 segs, _ = m.transcribe(audio_float, **{**_pure_hindi_kwargs(), "beam_size": 3})
@@ -248,7 +231,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     global _prev_text, _last_stable_idx, _partial_english_words, _partial_count
     global _last_language_guess
 
-    _warmup_done.wait(timeout=120)
+    
 
     audio = _np.frombuffer(chunk_bytes, _np.int16).flatten().astype(_np.float32) / 32768.0
     audio_len = len(audio)
@@ -274,22 +257,31 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         if not _clip_needs_shunyalabs:
             # ============ ENGLISH PATH ============
             try:
-                m, lk = get_base_en()
+                m, lk = get_shunyalabs()
+                print("DEBUG: starting transcribe English")
+                import time; t0=time.time()
                 with lk:
                     segs, _ = m.transcribe(
-                        audio, beam_size=5,
+                        audio, beam_size=1,
                         language="en",
                         without_timestamps=True,
                         condition_on_previous_text=False,
-                        vad_filter=True,
                         temperature=0,
-                        repetition_penalty=1.1,
-                        no_repeat_ngram_size=3,
+                        initial_prompt="In German, the word Sie means you, with a capital S.",
                     )
-                    text = _postprocess(" ".join(s.text for s in segs).strip())
+                print("DEBUG: transcribe English took", time.time()-t0)
+                text = _postprocess(" ".join(s.text for s in segs).strip())
                 return (text, len(text)) if text else ("", 0)
             except Exception:
-                return ("", 0)
+                try:
+                    m, lk = get_base_en()
+                    with lk:
+                        segs, _ = m.transcribe(audio, beam_size=1, language="en",
+                            without_timestamps=True, condition_on_previous_text=False)
+                        text = _postprocess(" ".join(s.text for s in segs).strip())
+                    return (text, len(text)) if text else ("", 0)
+                except Exception:
+                    return ("", 0)
 
         # ============ HINDI / HINGLISH PATH ============
         # Determine if pure Hindi vs Hinglish based on English words seen in partials
@@ -297,9 +289,9 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         if _partial_count >= 3 and len(_partial_english_words) < 2:
             _clip_is_pure_hindi = True
 
-        # For extremely long audio (>12s), prefer the bg result (computed on earlier chunk)
+        # For extremely long audio (>7s), prefer the bg result (computed on earlier chunk)
         # to avoid slow fg transcription that could timeout.
-        if audio_len > 16000 * 12:
+        if audio_len > 16000 * 7:
             # Wait briefly for bg thread to finish — it has a head start
             if _bg_thread is not None and _bg_thread.is_alive():
                 _bg_thread.join(timeout=3.0)
@@ -309,7 +301,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             # No bg result available — must run fg (risky but no choice)
 
         try:
-            m, lk = get_shunyalabs_fg()
+            m, lk = get_shunyalabs()
             with lk:
                 if _clip_is_pure_hindi:
                     segs, _ = m.transcribe(audio, **{**_pure_hindi_kwargs(), "beam_size": 5})
@@ -356,17 +348,24 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     # Skip re-transcription on long audio to free CPU for faster final
     if audio_len > 16000 * 7 and _prev_text:
         if _clip_needs_shunyalabs:
-            if audio_len > 16000 * 12.0:
+            if audio_len > 16000 * 4.0:
                 if audio_len - _last_bg_kick > 16000 * 2.0:
                     if _bg_thread is None or not _bg_thread.is_alive():
                         _last_bg_kick = audio_len
                         audio_copy = audio.copy()
-                    _bg_thread = threading.Thread(
-                        target=_bg_transcribe,
-                        args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
-                        daemon=True
-                    )
-                    _bg_thread.start()
+                        _bg_thread = threading.Thread(
+                            target=_bg_transcribe,
+                            args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
+                            daemon=True
+                        )
+                        _bg_thread.start()
+            with _bg_result_lock:
+                if _bg_result:
+                    combined = _bg_result
+                    stable = max(_last_stable_idx, len(combined) - 15)
+                    _prev_text = combined
+                    _last_stable_idx = stable
+                    return (combined, stable)
         return (_prev_text, _last_stable_idx)
 
     try:
@@ -412,17 +411,24 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
             _clip_is_pure_hindi = (_partial_count >= 2 and len(_partial_english_words) < 2)
 
         if _clip_needs_shunyalabs:
-            if audio_len > 16000 * 12.0:
+            if audio_len > 16000 * 4.0:
                 if audio_len - _last_bg_kick > 16000 * 2.0:
                     if _bg_thread is None or not _bg_thread.is_alive():
                         _last_bg_kick = audio_len
                         audio_copy = audio.copy()
-                    _bg_thread = threading.Thread(
-                        target=_bg_transcribe,
-                        args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
-                        daemon=True
-                    )
-                    _bg_thread.start()
+                        _bg_thread = threading.Thread(
+                            target=_bg_transcribe,
+                            args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
+                            daemon=True
+                        )
+                        _bg_thread.start()
+            with _bg_result_lock:
+                if _bg_result:
+                    combined = _bg_result
+                    stable = max(_last_stable_idx, len(combined) - 15)
+                    _prev_text = combined
+                    _last_stable_idx = stable
+                    return (combined, stable)
 
         if text:
             stable_len = _stable_length(_prev_text, text)
@@ -450,16 +456,15 @@ def _warmup_worker():
                  without_timestamps=True, condition_on_previous_text=False,
                  vad_filter=True, temperature=0, repetition_penalty=1.1)[0])
 
-        m_bg, lk_bg = get_shunyalabs_bg()
+        m_bg, lk_bg = get_shunyalabs()
         with lk_bg:
             list(m_bg.transcribe(_silence, **_hinglish_kwargs())[0])
 
-        m_fg, lk_fg = get_shunyalabs_fg()
+        m_fg, lk_fg = get_shunyalabs()
         with lk_fg:
             list(m_fg.transcribe(_silence, **_hinglish_kwargs())[0])
     except Exception:
         pass
     finally:
         _warmup_done.set()
-
-threading.Thread(target=_warmup_worker, daemon=True).start()
+# Warmup thread removed to avoid deadlock
