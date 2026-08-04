@@ -277,8 +277,12 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 try:
                     m, lk = get_base_en()
                     with lk:
-                        segs, _ = m.transcribe(audio, beam_size=1, language="en",
-                            without_timestamps=True, condition_on_previous_text=False)
+                        segs, _ = m.transcribe(
+                            audio, beam_size=1, language="en",
+                            without_timestamps=True, condition_on_previous_text=False,
+                            vad_filter=True, temperature=0,
+                            initial_prompt="In German, the word Sie means you, with a capital S."
+                        )
                         text = _postprocess(" ".join(s.text for s in segs).strip())
                     return (text, len(text)) if text else ("", 0)
                 except Exception:
