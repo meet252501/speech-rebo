@@ -266,6 +266,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                         language="en",
                         without_timestamps=True,
                         condition_on_previous_text=False,
+                        vad_filter=True,
                         temperature=0,
                         initial_prompt="In German, the word Sie means you, with a capital S.",
                     )
