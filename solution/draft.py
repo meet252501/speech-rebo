@@ -226,8 +226,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         if not _clip_needs_shunyalabs:
             # ============ ENGLISH PATH ============
             try:
-                m, lk = get_shunyalabs()
-                print("DEBUG: starting transcribe English")
+                m, lk = get_base_en()
                 import time; t0=time.time()
                 with lk:
                     segs, _ = m.transcribe(
@@ -240,22 +239,9 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                         initial_prompt="In German, the word Sie means you, with a capital S.",
                     )
                 print("DEBUG: transcribe English took", time.time()-t0)
-                text = _postprocess(" ".join(s.text for s in segs).strip())
                 return (text, len(text)) if text else ("", 0)
             except Exception:
-                try:
-                    m, lk = get_base_en()
-                    with lk:
-                        segs, _ = m.transcribe(
-                            audio, beam_size=1, language="en",
-                            without_timestamps=True, condition_on_previous_text=False,
-                            vad_filter=True, temperature=0,
-                            initial_prompt="In German, the word Sie means you, with a capital S."
-                        )
-                        text = _postprocess(" ".join(s.text for s in segs).strip())
-                    return (text, len(text)) if text else ("", 0)
-                except Exception:
-                    return ("", 0)
+                return ("", 0)
 
         # ============ HINDI / HINGLISH PATH ============
         # Determine if pure Hindi vs Hinglish based on English words seen in partials
@@ -314,7 +300,6 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 beam_size=1,
                 without_timestamps=True,
                 condition_on_previous_text=False,
-                vad_filter=True,
                 **extra
             )
             text = _postprocess(" ".join(s.text for s in segs).strip())
@@ -341,7 +326,6 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                     _clip_lang_confirmed = True
                 else:
                     _clip_needs_shunyalabs = True
-
 
         if text:
             stable_len = _stable_length(_prev_text, text)
