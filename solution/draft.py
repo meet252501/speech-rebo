@@ -237,8 +237,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                         vad_filter=True,
                         temperature=0,
                         initial_prompt="In German, the word Sie means you, with a capital S.",
-                    )
-                print("DEBUG: transcribe English took", time.time()-t0)
+                text = _postprocess(" ".join(s.text for s in segs).strip())
                 return (text, len(text)) if text else ("", 0)
             except Exception:
                 return ("", 0)
