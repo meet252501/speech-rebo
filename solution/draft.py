@@ -294,25 +294,15 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
         if _partial_count >= 3 and len(_partial_english_words) < 2:
             _clip_is_pure_hindi = True
 
-        # For extremely long audio (>7s), prefer the bg result (computed on earlier chunk)
-        # to avoid slow fg transcription that could timeout.
-        if audio_len > 16000 * 7:
-            # Wait briefly for bg thread to finish — it has a head start
-            if _bg_thread is not None and _bg_thread.is_alive():
-                _bg_thread.join(timeout=3.0)
-            with _bg_result_lock:
-                if _bg_result:
-                    return (_bg_result, len(_bg_result))
-            # No bg result available — must run fg (risky but no choice)
 
         try:
             m, lk = get_shunyalabs()
             with lk:
                 if _clip_is_pure_hindi:
-                    segs, _ = m.transcribe(audio, **{**_pure_hindi_kwargs(), "beam_size": 5})
+                    segs, _ = m.transcribe(audio, **{**_pure_hindi_kwargs(), "beam_size": 1})
                 else:
                     segs, _ = m.transcribe(
-                        audio, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 5}
+                        audio, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 1}
                     )
                 text = _postprocess(" ".join(s.text for s in segs).strip())
 
