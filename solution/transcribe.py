@@ -29,9 +29,9 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
     
     try:
         from faster_whisper import WhisperModel
+        import sys
+        threads = 6 if sys.platform == "darwin" else max(4, __import__('os').cpu_count() or 4)
         if _model_fast is None:
-            import sys
-            threads = 6 if sys.platform == "darwin" else max(4, __import__('os').cpu_count() or 4)
             _model_fast = WhisperModel("whisper_tiny_ct2", device="auto", compute_type="int8", local_files_only=True, cpu_threads=threads)
             
         a = time.time()
