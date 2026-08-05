@@ -342,30 +342,6 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
                 else:
                     _clip_needs_shunyalabs = True
 
-        # Dynamically update pure Hindi estimate for bg thread
-        # (final determination happens at is_final time)
-        if _clip_needs_shunyalabs:
-            _clip_is_pure_hindi = (_partial_count >= 2 and len(_partial_english_words) < 2)
-
-        if _clip_needs_shunyalabs:
-            if audio_len > 16000 * 4.0:
-                if audio_len - _last_bg_kick > 16000 * 2.0:
-                    if _bg_thread is None or not _bg_thread.is_alive():
-                        _last_bg_kick = audio_len
-                        audio_copy = audio.copy()
-                        _bg_thread = threading.Thread(
-                            target=_bg_transcribe,
-                            args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
-                            daemon=True
-                        )
-                        _bg_thread.start()
-            with _bg_result_lock:
-                if _bg_result:
-                    combined = _bg_result
-                    stable = max(_last_stable_idx, len(combined) - 15)
-                    _prev_text = combined
-                    _last_stable_idx = stable
-                    return (combined, stable)
 
         if text:
             stable_len = _stable_length(_prev_text, text)
