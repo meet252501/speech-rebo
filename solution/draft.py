@@ -121,14 +121,9 @@ def _strip_stray_english(text: str) -> str:
     return result if result else text  # fallback to original if stripping empties it
 
 
-_bg_result = None
-_bg_result_lock = threading.Lock()
-_bg_thread = None
-_bg_audio_len = 0
 _clip_needs_shunyalabs = False
 _clip_lang_confirmed = False
 _clip_is_pure_hindi = False  # True for FLEURS-style pure Hindi (no English words)
-_last_bg_kick = 0
 _prev_text = ""
 _clip_id = 0
 _last_stable_idx = 0
@@ -183,38 +178,13 @@ def _pure_hindi_kwargs():
     )
 
 
-def _bg_transcribe(audio_float: _np.ndarray, audio_len: int, my_clip_id: int,
-                    is_pure_hindi: bool):
-    global _bg_result, _bg_audio_len, _clip_id
-    try:
-        m, lk = get_shunyalabs()
-        with lk:
-            if is_pure_hindi:
-                segs, _ = m.transcribe(audio_float, **{**_pure_hindi_kwargs(), "beam_size": 3})
-            else:
-                segs, _ = m.transcribe(audio_float, **{**_hinglish_kwargs(_partial_english_words), "beam_size": 3})
-            text = _postprocess(" ".join(s.text for s in segs).strip())
-            if is_pure_hindi:
-                text = _strip_stray_english(text)
-        with _bg_result_lock:
-            if my_clip_id == _clip_id and audio_len >= _bg_audio_len:
-                _bg_result = text
-                _bg_audio_len = audio_len
-    except Exception:
-        pass
 
 
 def draft_reset():
-    global _bg_result, _bg_audio_len, _bg_thread, _last_bg_kick
     global _clip_needs_shunyalabs, _clip_lang_confirmed, _clip_is_pure_hindi
     global _prev_text, _last_stable_idx, _clip_id, _partial_english_words
     global _partial_count, _last_language_guess
-    with _bg_result_lock:
-        _bg_result = None
-        _bg_audio_len = 0
-        _clip_id += 1
-    _bg_thread = None
-    _last_bg_kick = 0
+    _clip_id += 1
     _clip_needs_shunyalabs = False
     _clip_lang_confirmed = False
     _clip_is_pure_hindi = False
@@ -226,8 +196,7 @@ def draft_reset():
 
 
 def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
-    global _bg_thread, _last_bg_kick, _clip_needs_shunyalabs, _clip_lang_confirmed
-    global _clip_is_pure_hindi
+    global _clip_needs_shunyalabs, _clip_lang_confirmed, _clip_is_pure_hindi
     global _prev_text, _last_stable_idx, _partial_english_words, _partial_count
     global _last_language_guess
 
@@ -312,16 +281,9 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
 
             if text:
                 return (text, len(text))
-            # fg produced empty — try bg result as fallback
-            with _bg_result_lock:
-                if _bg_result:
-                    return (_bg_result, len(_bg_result))
             return ("", 0)
         except Exception:
-            # fg failed — try bg result first, then tiny
-            with _bg_result_lock:
-                if _bg_result:
-                    return (_bg_result, len(_bg_result))
+            # fg failed — fallback to tiny
             try:
                 m, lk = get_tiny()
                 with lk:
@@ -340,27 +302,7 @@ def draft(chunk_bytes: bytes, is_final: bool) -> tuple[str, int]:
     if audio_len < 16000 * 0.5:
         return ("", 0)
 
-    # Skip re-transcription on long audio to free CPU for faster final
     if audio_len > 16000 * 7 and _prev_text:
-        if _clip_needs_shunyalabs:
-            if audio_len > 16000 * 4.0:
-                if audio_len - _last_bg_kick > 16000 * 2.0:
-                    if _bg_thread is None or not _bg_thread.is_alive():
-                        _last_bg_kick = audio_len
-                        audio_copy = audio.copy()
-                        _bg_thread = threading.Thread(
-                            target=_bg_transcribe,
-                            args=(audio_copy, audio_len, _clip_id, _clip_is_pure_hindi),
-                            daemon=True
-                        )
-                        _bg_thread.start()
-            with _bg_result_lock:
-                if _bg_result:
-                    combined = _bg_result
-                    stable = max(_last_stable_idx, len(combined) - 15)
-                    _prev_text = combined
-                    _last_stable_idx = stable
-                    return (combined, stable)
         return (_prev_text, _last_stable_idx)
 
     try:
